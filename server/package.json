@@ -26,6 +26,7 @@
     "nodemon": "^2.0.22",
     "path": "^0.12.7",
     "stream": "^0.0.2",
+    "user-agent-parser": "^0.6.0",
     "uuid": "^9.0.0"
   }
 }

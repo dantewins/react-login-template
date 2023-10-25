@@ -16,6 +16,7 @@ const transporter = mailer.createTransport({
 
 const Users = require("../Models/Users");
 const Tokens = require("../Models/Tokens");
+const Sessions = require("../Models/Sessions");
 
 const signup = asyncHandler(async (req, res) => {
     try {
@@ -45,7 +46,6 @@ const generateToken = (user, type) => {
 const login = asyncHandler(async (req, res) => {
     try {
         const cookies = req.cookies;
-        console.log(`cookie available at login: ${JSON.stringify(cookies)}`);
         if (!req.body.email || !req.body.password) return res.status(406).send({ message: "Email field or password field is empty", status: "error" });
 
         const user = await Users.findOne({
@@ -67,21 +67,29 @@ const login = asyncHandler(async (req, res) => {
                 username: user.username
             }, "refresh");
 
-            let newRTArray = !cookies?.jwt ? user.refreshToken : user.refreshToken.filter(rt => rt !== cookies.jwt);
-
             if (cookies?.jwt) {
                 const refreshToken = cookies.jwt;
-                const foundToken = await Users.findOne({ refreshToken }).exec();
+                const foundToken = await Sessions.findOne({ userId: user._id, refreshToken });
 
                 if (!foundToken) {
-                    newRTArray = [];
+                    await Sessions.deleteMany({ userId: user._id, refreshToken: { $ne: refreshToken } });
                 }
 
                 res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: true });
             }
 
-            user.refreshToken = [...newRTArray, newRT];
-            await user.save();
+            const userAgent = req.get('user-agent');
+            const { browser, device, os } = require('user-agent-parser')(userAgent);
+
+            await new Sessions({
+                userId: user._id,
+                refreshToken: newRT,
+                browser: browser.name,
+                browserVersion: browser.version,
+                device: device.type,
+                os: os.name,
+                osVersion: os.version
+            }).save();
 
             res.cookie('jwt', newRT, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 24 * 60 * 60 * 1000 });
 
@@ -105,8 +113,8 @@ const refresh = asyncHandler(async (req, res) => {
 
     res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: true });
 
-    const user = await Users.findOne({ refreshToken }).exec();
-
+    const session = await Sessions.findOne({ refreshToken });
+    const user = await Users.findOne({ _id: session.userId }).exec();
 
     if (!user) {
         jwt.verify(
@@ -116,7 +124,8 @@ const refresh = asyncHandler(async (req, res) => {
                 if (err) return res.sendStatus(403);
 
                 const user = await Users.findOne({ username: decoded.username }).exec();
-                user.refreshToken = [];
+
+                await Sessions.deleteMany({ userId: user._id });
 
                 await user.save();
             }
@@ -125,18 +134,26 @@ const refresh = asyncHandler(async (req, res) => {
         return res.sendStatus(403);
     }
 
-    const newRTArray = user.refreshToken.filter(rt => rt !== refreshToken);
-
     jwt.verify(
         refreshToken,
         process.env.REFRESH_TOKEN_SECRET,
         asyncHandler(async (err, decoded) => {
             if (err) {
-                user.refreshToken = [...newRTArray];
-                await user.save();
+                console.log(err);
+
+                await session.deleteOne();
             }
 
             if (err || user.username !== decoded.username) return res.sendStatus(403);
+
+            const userAgent = req.get('user-agent');
+            const { browser, device, os } = require('user-agent-parser')(userAgent);
+
+            if (session.browser !== browser.name || session.browserVersion !== browser.version || session.device !== device.type || session.os !== os.name || session.osVersion !== os.version) {
+                await session.deleteOne();
+                res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: true });
+                return res.sendStatus(204);
+            }
 
             const accessToken = generateToken({
                 "UserInfo": {
@@ -149,8 +166,8 @@ const refresh = asyncHandler(async (req, res) => {
                 username: user.username
             }, "refresh");
 
-            user.refreshToken = [...newRTArray, newRT];
-            await user.save();
+            session.refreshToken = newRT;
+            await session.save();
 
             res.cookie('jwt', newRT, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 24 * 60 * 60 * 1000 });
 
@@ -164,14 +181,13 @@ const logout = asyncHandler(async (req, res) => {
     if (!cookies?.jwt) return res.sendStatus(204);
     const refreshToken = cookies.jwt;
 
-    const user = await Users.findOne({ refreshToken }).exec();
-    if (!user) {
+    const session = await Sessions.findOne({ refreshToken });
+    if (!session) {
         res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: true });
         return res.sendStatus(204);
     }
 
-    user.refreshToken = user.refreshToken.filter(rt => rt !== refreshToken);;
-    await user.save();
+    await session.deleteOne();
 
     res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: true });
     res.sendStatus(204);
@@ -244,9 +260,10 @@ const resetPassword = asyncHandler(async (req, res) => {
 
         user.password = await bcrypt.hash(req.body.password, 10);
         user.lastResetPassword = new Date();
-        user.refreshToken = [];
-
+        
         await user.save();
+
+        await Sessions.deleteMany({ userId: user._id });
 
         await token.deleteOne();
 

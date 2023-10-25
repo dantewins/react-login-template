@@ -21,6 +21,5 @@ module.exports = model("users", new Schema({
         type: String,
         required: true
     },
-    lastResetPassword: Date,
-    refreshToken: [String]
+    lastResetPassword: Date
 }));
